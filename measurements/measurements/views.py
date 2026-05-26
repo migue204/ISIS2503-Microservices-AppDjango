@@ -1,64 +1,55 @@
-from .models import Measurement
-from django.shortcuts import render, redirect
-from django.contrib import messages
-from django.http import HttpResponse
-from django.http import JsonResponse
-from django.urls import reverse
-from django.conf import settings
 import requests
+from django.conf import settings
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.core.serializers import serialize
 import json
 
-def check_variable(data):
-    r = requests.get(settings.PATH_VAR, headers={"Accept":"application/json"})
-    variables = r.json()
-    for variable in variables:
-        if data["variable"] == variable["id"]:
-            return True
-    return False
+from .models import Measurement
 
-def get_place_id(data):
-    r = requests.get(settings.PATH_PLACES, headers={"Accept":"application/json"})
-    places = r.json()
-    for place in places:
-        if data["place"] == place["name"]:
-            return place["id"]
-    return -1
 
-def MeasurementList(request):
-    queryset = Measurement.objects.all()
-    context = list(queryset.values('id', 'variable', 'value', 'unit', 'place', 'dateTime'))
-    return JsonResponse(context, safe=False)
+def check_variable(variable_id):
+    try:
+        url = f"{settings.PATH_VAR}/variables/{variable_id}/"
+        response = requests.get(url, timeout=5)
+        return response.status_code == 200
+    except requests.exceptions.RequestException:
+        return False
 
-def MeasurementCreate(request):
-    if request.method == 'POST':
-        data = request.body.decode('utf-8')
-        data_json = json.loads(data)
-        if check_variable(data_json):
-            measurement = Measurement()
-            measurement.variable = data_json['variable']
-            measurement.value = data_json['value']
-            measurement.unit = data_json['unit']
-            measurement.place = data_json['place']
-            measurement.save()
-            return HttpResponse("Measurement successfully created")
+
+def measurements(request):
+    if request.method == 'GET':
+        variable_id = request.GET.get('variable', None)
+        if variable_id:
+            all_measurements = Measurement.objects.filter(variable=variable_id)
         else:
-            return HttpResponse("Error creating measurement. Variable or place does not exist", status=400)
+            all_measurements = Measurement.objects.all()
+        data = serialize('json', all_measurements)
+        return JsonResponse(json.loads(data), safe=False, status=200)
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
 
-def MeasurementsCreate(request):
+
+@csrf_exempt
+def create_measurement(request):
     if request.method == 'POST':
-        data = request.body.decode('utf-8')
-        data_json = json.loads(data)
-        measurement_list = []
-        for measurement in data_json:
-                    if check_variable(measurement) == True:
-                        db_measurement = Measurement()
-                        db_measurement.variable = measurement['variable']
-                        db_measurement.value = measurement['value']
-                        db_measurement.unit = measurement['unit']
-                        db_measurement.place = measurement['place']
-                        measurement_list.append(db_measurement)
-                    else:
-                        return HttpResponse("Error creating measurement. Variable or place does not exist", status=400)
-        
-        Measurement.objects.bulk_create(measurement_list)
-        return HttpResponse("Measurements successfully created")
+        try:
+            body = json.loads(request.body)
+        except (json.JSONDecodeError, TypeError):
+            body = request.POST.dict()
+        variable_id = body.get('variable')
+        value = body.get('value')
+        unit = body.get('unit')
+        place = body.get('place')
+        if not all([variable_id, value, unit]):
+            return JsonResponse({'error': 'Campos requeridos: variable, value, unit'}, status=400)
+        if not check_variable(variable_id):
+            return JsonResponse({'error': f'Variable con id={variable_id} no encontrada'}, status=404)
+        measurement = Measurement(
+            variable=variable_id,
+            value=float(value),
+            unit=unit,
+            place=place or '',
+        )
+        measurement.save()
+        return JsonResponse({'message': 'Measurement created', 'id': measurement.id}, status=201)
+    return JsonResponse({'error': 'Method not allowed'}, status=405)
